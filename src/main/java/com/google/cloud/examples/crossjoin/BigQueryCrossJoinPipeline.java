@@ -21,19 +21,18 @@ import com.google.api.services.bigquery.model.TableRow;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.transforms.View;
+import org.apache.beam.sdk.schemas.transforms.Group;
+import org.apache.beam.sdk.transforms.*;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.Serializable;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.time.Instant;
-import java.util.Date;
-import java.util.List;
+import java.util.*;
 
 
 /**
@@ -55,18 +54,68 @@ import java.util.List;
 public class BigQueryCrossJoinPipeline {
     private static final Logger LOG = LoggerFactory.getLogger(BigQueryCrossJoinPipeline.class);
 
+    public static class CombineHashMap extends Combine.CombineFn<TableRow, CombineHashMap.Accum, HashMap<Integer, List<TableRow>>> {
+        public class Accum implements Serializable {
+            HashMap<Integer, List<TableRow>> map = new HashMap<>();
+        }
+        public Accum createAccumulator() {
+            return new Accum();
+        }
+        public Accum addInput(Accum accum, TableRow tableRow) {
+            HashMap<Integer, List<TableRow>> hashMap = accum.map;
+            Integer collectorId = (Integer)tableRow.get("collector_id");
+            if(collectorId!=null)
+            {
+                if(hashMap.get(collectorId)!=null)
+                {
+                    hashMap.get(collectorId).add(tableRow);
+                }
+                else {
+                    List<TableRow> newList = new ArrayList<>();
+                    newList.add(tableRow);
+                    hashMap.put(collectorId, newList);
+                }
+            }
+            return accum;
+        }
+        public Accum mergeAccumulators(Iterable<Accum> accums) {
+            Accum merged = createAccumulator();
+            for (Accum accum : accums) {
+
+                for (Map.Entry<Integer, List<TableRow>> e : accum.map.entrySet()) {
+                    merged.map.merge(e.getKey(), e.getValue(), new SerializableBiFunction<List<TableRow>, List<TableRow>, List<TableRow>>() {
+                        @Override
+                        public List<TableRow> apply(List<TableRow> tableRows, List<TableRow> tableRows2) {
+
+                            List<TableRow> newList = new ArrayList<>();
+                            newList.addAll(tableRows);
+                            newList.addAll(tableRows2);
+                            return newList;
+                        }
+                    });
+                }
+            }
+            return merged;
+        }
+        public HashMap<Integer, List<TableRow>> extractOutput(Accum accum) {
+            return accum.map;
+        }
+    }
+
+
+
     public static void main(String[] args) {
         Pipeline p = Pipeline.create(
                 PipelineOptionsFactory.fromArgs(args).withValidation().create());
 
-
         // Create a side input that updates each second.
-        PCollectionView<List<TableRow>> contextView =
+        PCollectionView<HashMap<Integer,List<TableRow>>> contextView =
                 p.apply("Read Context Table",
                         BigQueryIO.readTableRows()
                                 .from("datalake.context")
                                 .withMethod(BigQueryIO.TypedRead.Method.DIRECT_READ))
-                        .apply(View.asList());
+                        .apply("CombineHashMap", Combine.globally(new CombineHashMap()))
+                        .apply(View.asSingleton());
 
 
         PCollection<TableRow> domain =
@@ -79,35 +128,39 @@ public class BigQueryCrossJoinPipeline {
                             @ProcessElement
                             public void processElement(ProcessContext c) {
                                 TableRow domain = c.element();
-                                List<TableRow> arrayContext = c.sideInput(contextView);
-                                for (TableRow context : arrayContext) {
-                                    c.output(context);
+                                HashMap<Integer, List<TableRow>> hashContext = c.sideInput(contextView);
+                                LOG.debug("Saida HASH");
+                                LOG.debug(hashContext.toString());
 
-//                                    if (domain.get("collector__id").equals(context.get("collector__id"))) {
-//
+                                Integer collectorId = Integer.parseInt((String) domain.get("collector__id"));
+
+                                List<TableRow> contextByCollectorId = hashContext.get(collectorId);
+                                if(contextByCollectorId!=null)
+                                {
+                                    for (TableRow context: contextByCollectorId)
+                                    {
+                                        SimpleDateFormat dateFormatLocal = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSSSSS");
 //                                        SimpleDateFormat dateFormatLocal = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSSSSS");
-//                                        LOG.debug(domain.get("emission_ts").getClass().toString());
-//                                        try {
-//                                            Date emissionTs = dateFormatLocal.parse(domain.get("emission_ts").toString());
-//                                            Date timestampLow = dateFormatLocal.parse(context.get("__timestamp_low").toString());
-//                                            Date timestampHigh = dateFormatLocal.parse(context.get("__timestamp_high").toString());
-//
-//                                            if (emissionTs.compareTo(timestampLow) >= 0) {
-//                                                if (emissionTs.compareTo(timestampHigh) <= 0) {
-//                                                    context.set("domain_id", domain.get("id"));
-//                                                    context.set("test", System.currentTimeMillis()/1000);
-//                                                    c.output(context);
-//                                                }
-//                                            }
-//                                        } catch (ParseException e) {
-//                                            e.printStackTrace();
-//                                        }
-//
-//                                    }
+                                        try {
+                                            Date emissionTs = dateFormatLocal.parse(domain.get("emission_ts").toString());
+                                            Date timestampLow = dateFormatLocal.parse(context.get("__timestamp_low").toString());
+                                            Date timestampHigh = dateFormatLocal.parse(context.get("__timestamp_high").toString());
+
+                                            if (emissionTs.compareTo(timestampLow) >= 0) {
+                                                if (emissionTs.compareTo(timestampHigh) <= 0) {
+                                                    context.set("domain_id", domain.get("id"));
+                                                    context.set("test", System.currentTimeMillis()/1000);
+                                                    c.output(domain);
+                                                }
+                                            }
+                                        } catch (ParseException e) {
+                                            e.printStackTrace();
+                                        }
+                                    }
                                 }
                             }
                         }).withSideInput("context", contextView));
-        domain.apply("Write to Merged", BigQueryIO.writeTableRows().to("datalake.crossjoin_dataflow").withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS).withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_NEVER).withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND));
+        domain.apply("Write to Merged", BigQueryIO.writeTableRows().to("datalake.crossjoin_dataflow").withMethod(BigQueryIO.Write.Method.FILE_LOADS).withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_NEVER).withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND));
 
         p.run();
     }
