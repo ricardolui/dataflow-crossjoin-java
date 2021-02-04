@@ -50,7 +50,8 @@ import java.util.Map;
  * <p>
  * mvn compile exec:java -Dexec.mainClass=com.google.cloud.examples.crossjoin.BigQueryCrossJoinPipelineWithHashedMapCombiner
  * -Dexec.args="--runner=DataflowRunner --project=<YOUR_PROJECT_ID> --tempLocation=<STAGING_LOCATION_IN_CLOUD_STORAGE>
- * --numWorkers=100 --maxNumWorkers=800 --workerMachineType=e2-highmem-4 --region=us-central1 --diskSizeGb=30"
+ * --numWorkers=100 --maxNumWorkers=800 --workerMachineType=e2-highmem-4 --region=us-central1 --diskSizeGb=30
+ * --contextTableRef=<PROJECT>:<DATASET><TABLE> --domainTableRef=<PROJECT>:<DATASET><TABLE> --destinationTableRef=<PROJECT>:<DATASET><TABLE>"
  */
 public class BigQueryCrossJoinPipeline {
 
